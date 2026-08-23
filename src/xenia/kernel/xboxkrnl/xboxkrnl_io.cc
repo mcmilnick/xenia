@@ -8,6 +8,7 @@
  */
 
 #include "xenia/base/logging.h"
+#include "xenia/cpu/processor.h"
 #include "xenia/kernel/info/file.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -864,18 +865,30 @@ dword_result_t IoCreateDevice_entry(pointer_t<X_DRIVER_OBJECT> driver_object,
 }
 DECLARE_XBOXKRNL_EXPORT1(IoCreateDevice, kFileSystem, kStub);
 
-// supposed to invoke a callback on the driver object! its some sort of
-// destructor function intended to be called for all devices created from the
-// driver
+// Invokes the driver's delete-device callback (X_DRIVER_OBJECT's
+// driver_delete_device_ptr, offset 4) before freeing, if the driver set
+// one. Uses the same synchronous guest-callback pattern already proven
+// elsewhere in the kernel (e.g. APC rundown/DPC routines in
+// xboxkrnl_threading.cc via processor()->Execute).
 void IoDeleteDevice_entry(pointer_t<X_DEVICE_OBJECT> device_ptr,
                           const ppc_context_t& ctx) {
   if (device_ptr) {
     auto kernel_mem = ctx->kernel_state->memory();
+    if (device_ptr->drive_object_ptr.m_ptr != 0) {
+      auto driver = kernel_mem->TranslateVirtual<X_DRIVER_OBJECT*>(
+          device_ptr->drive_object_ptr.m_ptr);
+      if (driver->driver_delete_device_ptr != 0) {
+        uint64_t args[] = {device_ptr.guest_address()};
+        ctx->kernel_state->processor()->Execute(
+            ctx->thread_state, driver->driver_delete_device_ptr, args,
+            xe::countof(args));
+      }
+    }
     kernel_mem->SystemHeapFree(device_ptr);
   }
 }
 
-DECLARE_XBOXKRNL_EXPORT1(IoDeleteDevice, kFileSystem, kStub);
+DECLARE_XBOXKRNL_EXPORT1(IoDeleteDevice, kFileSystem, kImplemented);
 
 }  // namespace xboxkrnl
 }  // namespace kernel
