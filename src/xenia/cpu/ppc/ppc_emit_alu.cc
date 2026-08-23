@@ -9,6 +9,8 @@
 
 #include "xenia/cpu/ppc/ppc_emit-private.h"
 
+#include <cstdint>
+
 #include "xenia/base/assert.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
@@ -230,6 +232,32 @@ int InstrEmit_addzex(PPCHIRBuilder& f, const InstrData& i) {
   return 0;
 }
 
+// Divide-overflow detection at the given width. Signed: overflow iff
+// divisor==0 OR (dividend==INT_MIN-at-width AND divisor==-1). Unsigned:
+// overflow iff divisor==0. Verified against QEMU's target/ppc
+// gen_op_arith_divw/gen_op_arith_divd (same two conditions, same OR).
+// The division itself is already safe to perform unconditionally
+// regardless of this result - the x64 backend's OPCODE_DIV lowering
+// (DIV_I32/DIV_I64 in x64_sequences.cc) already special-cases both the
+// zero-divisor and INT_MIN/-1 cases to avoid a host divide
+// exception/fault, producing 0 as the (architecturally-undefined-anyway)
+// result value. This helper only computes the flag.
+Value* DivDidOverflow(PPCHIRBuilder& f, Value* dividend, Value* divisor,
+                      bool is_signed, TypeName width) {
+  Value* is_zero_divisor = f.CompareEQ(divisor, f.LoadZero(width));
+  if (!is_signed) {
+    return is_zero_divisor;
+  }
+  Value* int_min = width == INT32_TYPE
+                       ? f.LoadConstantInt32(INT32_MIN)
+                       : f.LoadConstantInt64(INT64_MIN);
+  Value* minus_one =
+      width == INT32_TYPE ? f.LoadConstantInt32(-1) : f.LoadConstantInt64(-1);
+  Value* is_int_min_over_neg1 = f.And(f.CompareEQ(dividend, int_min),
+                                      f.CompareEQ(divisor, minus_one));
+  return f.Or(is_zero_divisor, is_int_min_over_neg1);
+}
+
 int InstrEmit_divdx(PPCHIRBuilder& f, const InstrData& i) {
   // dividend <- (RA)
   // divisor <- (RB)
@@ -238,16 +266,13 @@ int InstrEmit_divdx(PPCHIRBuilder& f, const InstrData& i) {
   //     XER[OV] <- 1
   //   return
   // RT <- dividend ÷ divisor
+  Value* dividend = f.LoadGPR(i.XO.RA);
   Value* divisor = f.LoadGPR(i.XO.RB);
-  // TODO(benvanik): check if zero
-  //                 if OE=1, set XER[OV] = 1
-  //                 else skip the divide
-  Value* v = f.Div(f.LoadGPR(i.XO.RA), divisor);
+  Value* v = f.Div(dividend, divisor);
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    // If we are OE=1 we need to clear the overflow bit.
-    // e.update_xer_with_overflow(e.get_uint64(0));
-    XEINSTRNOTIMPLEMENTED();
+    StoreOverflow(f,
+                  DivDidOverflow(f, dividend, divisor, true, INT64_TYPE));
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -263,16 +288,13 @@ int InstrEmit_divdux(PPCHIRBuilder& f, const InstrData& i) {
   //     XER[OV] <- 1
   //   return
   // RT <- dividend ÷ divisor
+  Value* dividend = f.LoadGPR(i.XO.RA);
   Value* divisor = f.LoadGPR(i.XO.RB);
-  // TODO(benvanik): check if zero
-  //                 if OE=1, set XER[OV] = 1
-  //                 else skip the divide
-  Value* v = f.Div(f.LoadGPR(i.XO.RA), divisor, ARITHMETIC_UNSIGNED);
+  Value* v = f.Div(dividend, divisor, ARITHMETIC_UNSIGNED);
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    // If we are OE=1 we need to clear the overflow bit.
-    // e.update_xer_with_overflow(e.get_uint64(0));
-    XEINSTRNOTIMPLEMENTED();
+    StoreOverflow(f,
+                  DivDidOverflow(f, dividend, divisor, false, INT64_TYPE));
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -289,17 +311,14 @@ int InstrEmit_divwx(PPCHIRBuilder& f, const InstrData& i) {
   //   return
   // RT[32:63] <- dividend ÷ divisor
   // RT[0:31] <- undefined
+  Value* dividend = f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE);
   Value* divisor = f.Truncate(f.LoadGPR(i.XO.RB), INT32_TYPE);
-  // TODO(benvanik): check if zero
-  //                 if OE=1, set XER[OV] = 1
-  //                 else skip the divide
-  Value* v = f.Div(f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE), divisor);
+  Value* v = f.Div(dividend, divisor);
   v = f.ZeroExtend(v, INT64_TYPE);
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    // If we are OE=1 we need to clear the overflow bit.
-    // e.update_xer_with_overflow(e.get_uint64(0));
-    XEINSTRNOTIMPLEMENTED();
+    StoreOverflow(f,
+                  DivDidOverflow(f, dividend, divisor, true, INT32_TYPE));
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -316,18 +335,14 @@ int InstrEmit_divwux(PPCHIRBuilder& f, const InstrData& i) {
   //   return
   // RT[32:63] <- dividend ÷ divisor
   // RT[0:31] <- undefined
+  Value* dividend = f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE);
   Value* divisor = f.Truncate(f.LoadGPR(i.XO.RB), INT32_TYPE);
-  // TODO(benvanik): check if zero
-  //                 if OE=1, set XER[OV] = 1
-  //                 else skip the divide
-  Value* v = f.Div(f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE), divisor,
-                   ARITHMETIC_UNSIGNED);
+  Value* v = f.Div(dividend, divisor, ARITHMETIC_UNSIGNED);
   v = f.ZeroExtend(v, INT64_TYPE);
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    // If we are OE=1 we need to clear the overflow bit.
-    // e.update_xer_with_overflow(e.get_uint64(0));
-    XEINSTRNOTIMPLEMENTED();
+    StoreOverflow(f,
+                  DivDidOverflow(f, dividend, divisor, false, INT32_TYPE));
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -337,10 +352,14 @@ int InstrEmit_divwux(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_mulhdx(PPCHIRBuilder& f, const InstrData& i) {
   // RT <- ((RA) × (RB) as 128)[0:63]
-  if (i.XO.OE) {
-    // With XER update.
-    XEINSTRNOTIMPLEMENTED();
-  }
+  // mulhd/mulhdu/mulhw/mulhwu have no OE-capable form at all - OE is a
+  // reserved (must-be-zero) bit for this instruction family on real
+  // hardware, since a high-word multiply result is always exactly
+  // correct and can never overflow. Confirmed via QEMU's decodetree
+  // translation (do_mulhw/do_mulhd in translate/fixedpoint-impl.c.inc
+  // never reference cpu_ov, and there's no MULHWO/MULHDO variant
+  // defined anywhere, unlike MULLWO/MULLDO for the low-word multiplies
+  // below).
   Value* v = f.MulHi(f.LoadGPR(i.XO.RA), f.LoadGPR(i.XO.RB));
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.Rc) {
@@ -351,10 +370,6 @@ int InstrEmit_mulhdx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_mulhdux(PPCHIRBuilder& f, const InstrData& i) {
   // RT <- ((RA) × (RB) as 128)[0:63]
-  if (i.XO.OE) {
-    // With XER update.
-    XEINSTRNOTIMPLEMENTED();
-  }
   Value* v =
       f.MulHi(f.LoadGPR(i.XO.RA), f.LoadGPR(i.XO.RB), ARITHMETIC_UNSIGNED);
   f.StoreGPR(i.XO.RT, v);
@@ -366,10 +381,6 @@ int InstrEmit_mulhdux(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_mulhwx(PPCHIRBuilder& f, const InstrData& i) {
   // RT[32:64] <- ((RA)[32:63] × (RB)[32:63])[0:31]
-  if (i.XO.OE) {
-    // With XER update.
-    XEINSTRNOTIMPLEMENTED();
-  }
   Value* ratrunc =
       f.SignExtend(f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE), INT64_TYPE);
 
@@ -387,11 +398,6 @@ int InstrEmit_mulhwx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_mulhwux(PPCHIRBuilder& f, const InstrData& i) {
   // RT[32:64] <- ((RA)[32:63] × (RB)[32:63])[0:31]
-  if (i.XO.OE) {
-    // With XER update.
-    XEINSTRNOTIMPLEMENTED();
-  }
-
   Value* ratrunc =
       f.ZeroExtend(f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE), INT64_TYPE);
 
@@ -408,12 +414,20 @@ int InstrEmit_mulhwux(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_mulldx(PPCHIRBuilder& f, const InstrData& i) {
   // RT <- ((RA) × (RB))[64:127]
-  if (i.XO.OE) {
-    // With XER update.
-    XEINSTRNOTIMPLEMENTED();
-  }
-  Value* v = f.Mul(f.LoadGPR(i.XO.RA), f.LoadGPR(i.XO.RB));
+  Value* ra = f.LoadGPR(i.XO.RA);
+  Value* rb = f.LoadGPR(i.XO.RB);
+  Value* v = f.Mul(ra, rb);
   f.StoreGPR(i.XO.RT, v);
+  if (i.XO.OE) {
+    // Overflow iff the true high 64 bits of the 128-bit product don't
+    // match what sign-extending the stored (low 64 bits) result would
+    // predict. Verified against QEMU's trans_MULLDO (same
+    // mulhi-vs-sign-extended-low-half comparison, one width up from
+    // mullwx below).
+    Value* true_high = f.MulHi(ra, rb);
+    Value* expected_high = f.Sha(v, int8_t(63));
+    StoreOverflow(f, f.CompareNE(true_high, expected_high));
+  }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
   }
@@ -430,14 +444,20 @@ int InstrEmit_mulli(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_mullwx(PPCHIRBuilder& f, const InstrData& i) {
   // RT <- (RA)[32:63] × (RB)[32:63]
-  if (i.XO.OE) {
-    // With XER update.
-    XEINSTRNOTIMPLEMENTED();
-  }
   Value* v = f.Mul(
       f.SignExtend(f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE), INT64_TYPE),
       f.SignExtend(f.Truncate(f.LoadGPR(i.XO.RB), INT32_TYPE), INT64_TYPE));
   f.StoreGPR(i.XO.RT, v);
+  if (i.XO.OE) {
+    // Overflow iff the true 32x32->64 product doesn't fit back into the
+    // low 32 bits as a signed value - i.e. sign-extending the low 32
+    // bits of the product (already exact here, since a 32x32 signed
+    // multiply never overflows 64 bits) doesn't reproduce it. Verified
+    // against QEMU's trans_MULLWO.
+    Value* low32 = f.Truncate(v, INT32_TYPE);
+    Value* expected = f.SignExtend(low32, INT64_TYPE);
+    StoreOverflow(f, f.CompareNE(v, expected));
+  }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
   }
