@@ -390,8 +390,42 @@ object_ref<XModule> KernelState::GetModule(const std::string_view name,
 
   auto path(name);
 
-  // Resolve the path to an absolute path.
-  auto entry = file_system_->ResolvePath(name);
+  // Resolve the path to an absolute path. Some games (and Xenia's own
+  // library-import setup for the executable module itself) request a
+  // bare name with no device/drive prefix, expecting it to resolve
+  // relative to the currently-loading module's own directory - the same
+  // situation LoadUserModule already handles for direct XexLoadImage
+  // calls. Also try appending ".dll" if the bare name has no extension
+  // (real Xbox 360/Windows GetModuleHandle-style lookups do this too -
+  // a bare module name like "ELEA" implicitly means "ELEA.dll").
+  auto try_resolve = [&](const std::string_view candidate) -> xe::vfs::Entry* {
+    if (auto direct = file_system_->ResolvePath(candidate)) {
+      return direct;
+    }
+    if (xe::utf8::find_name_from_guest_path(candidate) != candidate) {
+      return nullptr;
+    }
+    // executable_module_ isn't set yet while the executable module
+    // itself is still being loaded (this runs during its own
+    // SetupLibraryImports) - fall back to the first loaded user module
+    // in that case, same as LoadUserModule already does.
+    std::string_view base_module_path;
+    if (executable_module_) {
+      base_module_path = executable_module_->path();
+    } else if (!user_modules_.empty()) {
+      base_module_path = (*user_modules_.cbegin())->path();
+    }
+    if (base_module_path.empty()) {
+      return nullptr;
+    }
+    return file_system_->ResolvePath(xe::utf8::join_guest_paths(
+        xe::utf8::find_base_guest_path(base_module_path), candidate));
+  };
+
+  auto entry = try_resolve(name);
+  if (!entry && name.find('.') == std::string_view::npos) {
+    entry = try_resolve(std::string(name) + ".dll");
+  }
   if (entry) {
     path = entry->absolute_path();
   }

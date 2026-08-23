@@ -490,7 +490,6 @@ dword_result_t NtQueryFullAttributesFile_entry(
         obj_attribs->root_directory);
     assert_not_null(root_file);
     assert_true(root_file->type() == XObject::Type::File);
-    assert_always();
   }
 
   auto target_path = util::TranslateAnsiPath(kernel_memory(), object_name);
@@ -500,8 +499,13 @@ dword_result_t NtQueryFullAttributesFile_entry(
     return X_STATUS_OBJECT_NAME_INVALID;
   }
 
-  // Resolve the file using the virtual file system.
-  auto entry = kernel_state()->file_system()->ResolvePath(target_path);
+  // Resolve the file using the virtual file system, relative to
+  // root_directory's entry if one was supplied (matches NtCreateFile's
+  // handling - previously this was looked up but never actually used,
+  // so any relative-to-root_directory query would incorrectly try to
+  // resolve target_path as an absolute path and fail).
+  auto entry = root_file ? root_file->entry()->ResolvePath(target_path)
+                        : kernel_state()->file_system()->ResolvePath(target_path);
   if (entry) {
     // Found.
     file_info->creation_time = entry->create_timestamp();
