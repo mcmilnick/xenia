@@ -502,14 +502,18 @@ void PPCHIRBuilder::CopyFPSCRToCR1() {
 }
 
 Value* PPCHIRBuilder::LoadXER() {
+  // XER bit layout (IBM/PowerPC MSB-0 numbering): XER[0]=SO, XER[1]=OV,
+  // XER[2]=CA - i.e. common-numbered bits 31, 30, 29 respectively.
   Value* v = Shl(ZeroExtend(LoadCA(), INT64_TYPE), 29);
-  // TODO(benvanik): construct with other flags; overflow, etc?
+  v = Or(v, Shl(ZeroExtend(LoadOV(), INT64_TYPE), 30));
+  v = Or(v, Shl(ZeroExtend(LoadSO(), INT64_TYPE), 31));
   return v;
 }
 
 void PPCHIRBuilder::StoreXER(Value* value) {
-  // TODO(benvanik): use other fields? For now, just pull out CA.
   StoreCA(Truncate(And(Shr(value, 29), LoadConstantInt64(1)), INT8_TYPE));
+  StoreOV(Truncate(And(Shr(value, 30), LoadConstantInt64(1)), INT8_TYPE));
+  StoreSO(Truncate(And(Shr(value, 31), LoadConstantInt64(1)), INT8_TYPE));
 }
 
 Value* PPCHIRBuilder::LoadCA() {
@@ -522,6 +526,32 @@ void PPCHIRBuilder::StoreCA(Value* value) {
 
   auto& trace_reg = trace_info_.dests[trace_info_.dest_count++];
   trace_reg.reg = 66;
+  trace_reg.value = value;
+}
+
+Value* PPCHIRBuilder::LoadOV() {
+  return LoadContext(offsetof(PPCContext, xer_ov), INT8_TYPE);
+}
+
+void PPCHIRBuilder::StoreOV(Value* value) {
+  assert_true(value->type == INT8_TYPE);
+  StoreContext(offsetof(PPCContext, xer_ov), value);
+
+  auto& trace_reg = trace_info_.dests[trace_info_.dest_count++];
+  trace_reg.reg = 68;
+  trace_reg.value = value;
+}
+
+Value* PPCHIRBuilder::LoadSO() {
+  return LoadContext(offsetof(PPCContext, xer_so), INT8_TYPE);
+}
+
+void PPCHIRBuilder::StoreSO(Value* value) {
+  assert_true(value->type == INT8_TYPE);
+  StoreContext(offsetof(PPCContext, xer_so), value);
+
+  auto& trace_reg = trace_info_.dests[trace_info_.dest_count++];
+  trace_reg.reg = 69;
   trace_reg.value = value;
 }
 

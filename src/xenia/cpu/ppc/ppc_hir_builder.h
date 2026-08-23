@@ -63,11 +63,12 @@ class PPCHIRBuilder : public hir::HIRBuilder {
   void CopyFPSCRToCR1();
   Value* LoadXER();
   void StoreXER(Value* value);
-  // void UpdateXERWithOverflow();
-  // void UpdateXERWithOverflowAndCarry();
-  // void StoreOV(Value* value);
   Value* LoadCA();
   void StoreCA(Value* value);
+  Value* LoadOV();
+  void StoreOV(Value* value);
+  Value* LoadSO();
+  void StoreSO(Value* value);
   Value* LoadSAT();
   void StoreSAT(Value* value);
 
