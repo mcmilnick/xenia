@@ -757,8 +757,16 @@ int InstrEmit_sync(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_isync(PPCHIRBuilder& f, const InstrData& i) {
-  // XEINSTRNOTIMPLEMENTED();
-  f.Nop();
+  // isync (Instruction Synchronize) discards any prefetched/speculative
+  // instructions and, in practice for our purposes, must also act as a
+  // memory barrier: real hardware guarantees that a thread does not proceed
+  // on stale data fetched before a preceding lock acquire (lwarx/stwcx.)
+  // completes. This is the standard "acquire" barrier compilers emit right
+  // after taking a spinlock. Previously a no-op here, which allowed a
+  // waiting thread's JIT'd code to keep observing a stale cached value of a
+  // lock-guarded flag/pointer indefinitely, even after another thread wrote
+  // a real update to guest memory.
+  f.MemoryBarrier();
   return 0;
 }
 
