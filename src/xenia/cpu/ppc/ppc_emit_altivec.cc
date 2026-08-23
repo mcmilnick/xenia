@@ -867,14 +867,60 @@ int InstrEmit_vmaxuw(PPCHIRBuilder& f, const InstrData& i) {
   return 0;
 }
 
+// Signed 16-bit saturation on an INT32_TYPE scalar; caller truncates the
+// result to INT16_TYPE. Used by the vmhaddshs/vmhraddshs pair below.
+static Value* SaturateS16_32(PPCHIRBuilder& f, Value* v32) {
+  v32 = f.Max(v32, f.LoadConstantInt32(-32768));
+  v32 = f.Min(v32, f.LoadConstantInt32(32767));
+  return v32;
+}
+
 int InstrEmit_vmhaddshs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vmhaddshs VD,VA,VB,VC - Vector Multiply High and Add Signed Halfword
+  // Saturate. For each halfword lane j: prod = VA[j]*VB[j] (signed,
+  // 16x16->32); t = VC[j] + (prod >> 15); VD[j] = SignedSaturate16(t).
+  // Verified against QEMU's helper_VMHADDSHS reference implementation.
+  Value* va = f.LoadVR(i.VXA.VA);
+  Value* vb = f.LoadVR(i.VXA.VB);
+  Value* vc = f.LoadVR(i.VXA.VC);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 8; ++j) {
+    Value* a =
+        f.SignExtend(f.Extract(va, uint8_t(j), INT16_TYPE), INT32_TYPE);
+    Value* b =
+        f.SignExtend(f.Extract(vb, uint8_t(j), INT16_TYPE), INT32_TYPE);
+    Value* c =
+        f.SignExtend(f.Extract(vc, uint8_t(j), INT16_TYPE), INT32_TYPE);
+    Value* t = f.Add(c, f.Sha(f.Mul(a, b), int8_t(15)));
+    t = SaturateS16_32(f, t);
+    result = f.Insert(result, uint64_t(j), f.Truncate(t, INT16_TYPE));
+  }
+  f.StoreVR(i.VXA.VD, result);
+  return 0;
 }
 
 int InstrEmit_vmhraddshs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vmhraddshs VD,VA,VB,VC - same as vmhaddshs but with a round-to-
+  // nearest bias (0x4000) added to the product before the >>15. Verified
+  // against QEMU's helper_VMHRADDSHS reference implementation.
+  Value* va = f.LoadVR(i.VXA.VA);
+  Value* vb = f.LoadVR(i.VXA.VB);
+  Value* vc = f.LoadVR(i.VXA.VC);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 8; ++j) {
+    Value* a =
+        f.SignExtend(f.Extract(va, uint8_t(j), INT16_TYPE), INT32_TYPE);
+    Value* b =
+        f.SignExtend(f.Extract(vb, uint8_t(j), INT16_TYPE), INT32_TYPE);
+    Value* c =
+        f.SignExtend(f.Extract(vc, uint8_t(j), INT16_TYPE), INT32_TYPE);
+    Value* prod = f.Add(f.Mul(a, b), f.LoadConstantInt32(0x4000));
+    Value* t = f.Add(c, f.Sha(prod, int8_t(15)));
+    t = SaturateS16_32(f, t);
+    result = f.Insert(result, uint64_t(j), f.Truncate(t, INT16_TYPE));
+  }
+  f.StoreVR(i.VXA.VD, result);
+  return 0;
 }
 
 int InstrEmit_vminfp_(PPCHIRBuilder& f, uint32_t vd, uint32_t va, uint32_t vb) {
@@ -936,8 +982,26 @@ int InstrEmit_vminuw(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_vmladduhm(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vmladduhm VD,VA,VB,VC - Vector Multiply Low, Add Unsigned Halfword
+  // Modulo. For each halfword lane j: VD[j] = low16(VA[j]*VB[j] + VC[j]).
+  // Modulo arithmetic, so signed vs. unsigned extension doesn't change
+  // the truncated result. Verified against QEMU's helper_VMLADDUHM.
+  Value* va = f.LoadVR(i.VXA.VA);
+  Value* vb = f.LoadVR(i.VXA.VB);
+  Value* vc = f.LoadVR(i.VXA.VC);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 8; ++j) {
+    Value* a =
+        f.ZeroExtend(f.Extract(va, uint8_t(j), INT16_TYPE), INT32_TYPE);
+    Value* b =
+        f.ZeroExtend(f.Extract(vb, uint8_t(j), INT16_TYPE), INT32_TYPE);
+    Value* c =
+        f.ZeroExtend(f.Extract(vc, uint8_t(j), INT16_TYPE), INT32_TYPE);
+    Value* t = f.Add(f.Mul(a, b), c);
+    result = f.Insert(result, uint64_t(j), f.Truncate(t, INT16_TYPE));
+  }
+  f.StoreVR(i.VXA.VD, result);
+  return 0;
 }
 
 int InstrEmit_vmrghb(PPCHIRBuilder& f, const InstrData& i) {
@@ -1021,34 +1085,156 @@ int InstrEmit_vmrglw128(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vmrglw_(f, VX128_VD128, VX128_VA128, VX128_VB128);
 }
 
+// Defined further below, next to the vsum* family; forward-declared here
+// since vmsumshs (below) needs it before that point in the file.
+static Value* SaturateS32_64(PPCHIRBuilder& f, Value* v64);
+
+// Unsigned 32-bit saturation on an INT64_TYPE scalar - counterpart to
+// SaturateS32_64 above. Used by vmsumuhs.
+static Value* SaturateU32_64b(PPCHIRBuilder& f, Value* v64) {
+  v64 = f.Max(v64, f.LoadConstantInt64(0));
+  v64 = f.Min(v64, f.LoadConstantInt64(4294967295LL));
+  return v64;
+}
+
 int InstrEmit_vmsummbm(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vmsummbm VD,VA,VB,VC - Vector Multiply Sum Mixed-sign Byte Modulo.
+  // Mixed-sign: VA bytes are signed, VB bytes are unsigned. For each
+  // word lane j: VD[j] = VC[j] + sum over k=0..3 of
+  // (signed VA[4j+k] * unsigned VB[4j+k]). Modulo (no saturation).
+  // Verified against QEMU's helper_VMSUMMBM.
+  Value* va = f.LoadVR(i.VXA.VA);
+  Value* vb = f.LoadVR(i.VXA.VB);
+  Value* vc = f.LoadVR(i.VXA.VC);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* sum = f.Extract(vc, uint8_t(j), INT32_TYPE);
+    for (uint32_t k = 0; k < 4; ++k) {
+      uint8_t idx = uint8_t(4 * j + k);
+      Value* a = f.SignExtend(f.Extract(va, idx, INT8_TYPE), INT32_TYPE);
+      Value* b = f.ZeroExtend(f.Extract(vb, idx, INT8_TYPE), INT32_TYPE);
+      sum = f.Add(sum, f.Mul(a, b));
+    }
+    result = f.Insert(result, uint64_t(j), sum);
+  }
+  f.StoreVR(i.VXA.VD, result);
+  return 0;
 }
 
 int InstrEmit_vmsumshm(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vmsumshm VD,VA,VB,VC - Vector Multiply Sum Signed Halfword Modulo.
+  // VD[j] = VC[j] + VA[2j]*VB[2j] + VA[2j+1]*VB[2j+1] (signed, modulo).
+  // Verified against QEMU's helper_VMSUMSHM.
+  Value* va = f.LoadVR(i.VXA.VA);
+  Value* vb = f.LoadVR(i.VXA.VB);
+  Value* vc = f.LoadVR(i.VXA.VC);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* sum = f.Extract(vc, uint8_t(j), INT32_TYPE);
+    for (uint32_t k = 0; k < 2; ++k) {
+      uint8_t idx = uint8_t(2 * j + k);
+      Value* a = f.SignExtend(f.Extract(va, idx, INT16_TYPE), INT32_TYPE);
+      Value* b = f.SignExtend(f.Extract(vb, idx, INT16_TYPE), INT32_TYPE);
+      sum = f.Add(sum, f.Mul(a, b));
+    }
+    result = f.Insert(result, uint64_t(j), sum);
+  }
+  f.StoreVR(i.VXA.VD, result);
+  return 0;
 }
 
 int InstrEmit_vmsumshs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vmsumshs VD,VA,VB,VC - Vector Multiply Sum Signed Halfword Saturate.
+  // Same lane math as vmsumshm but computed widened and signed-saturated
+  // into VD[j] instead of wrapping. Verified against QEMU's
+  // helper_VMSUMSHS.
+  Value* va = f.LoadVR(i.VXA.VA);
+  Value* vb = f.LoadVR(i.VXA.VB);
+  Value* vc = f.LoadVR(i.VXA.VC);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* sum =
+        f.SignExtend(f.Extract(vc, uint8_t(j), INT32_TYPE), INT64_TYPE);
+    for (uint32_t k = 0; k < 2; ++k) {
+      uint8_t idx = uint8_t(2 * j + k);
+      Value* a = f.SignExtend(f.Extract(va, idx, INT16_TYPE), INT64_TYPE);
+      Value* b = f.SignExtend(f.Extract(vb, idx, INT16_TYPE), INT64_TYPE);
+      sum = f.Add(sum, f.Mul(a, b));
+    }
+    sum = SaturateS32_64(f, sum);
+    result = f.Insert(result, uint64_t(j), f.Truncate(sum, INT32_TYPE));
+  }
+  f.StoreVR(i.VXA.VD, result);
+  return 0;
 }
 
 int InstrEmit_vmsumubm(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vmsumubm VD,VA,VB,VC - Vector Multiply Sum Unsigned Byte Modulo.
+  // VD[j] = VC[j] + sum over k=0..3 of unsigned VA[4j+k] *
+  // unsigned VB[4j+k]. Modulo. Verified against QEMU's helper_VMSUMUBM.
+  Value* va = f.LoadVR(i.VXA.VA);
+  Value* vb = f.LoadVR(i.VXA.VB);
+  Value* vc = f.LoadVR(i.VXA.VC);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* sum = f.Extract(vc, uint8_t(j), INT32_TYPE);
+    for (uint32_t k = 0; k < 4; ++k) {
+      uint8_t idx = uint8_t(4 * j + k);
+      Value* a = f.ZeroExtend(f.Extract(va, idx, INT8_TYPE), INT32_TYPE);
+      Value* b = f.ZeroExtend(f.Extract(vb, idx, INT8_TYPE), INT32_TYPE);
+      sum = f.Add(sum, f.Mul(a, b));
+    }
+    result = f.Insert(result, uint64_t(j), sum);
+  }
+  f.StoreVR(i.VXA.VD, result);
+  return 0;
 }
 
 int InstrEmit_vmsumuhm(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vmsumuhm VD,VA,VB,VC - Vector Multiply Sum Unsigned Halfword Modulo.
+  // VD[j] = VC[j] + unsigned VA[2j]*VB[2j] + unsigned VA[2j+1]*VB[2j+1].
+  // Modulo. Verified against QEMU's helper_VMSUMUHM.
+  Value* va = f.LoadVR(i.VXA.VA);
+  Value* vb = f.LoadVR(i.VXA.VB);
+  Value* vc = f.LoadVR(i.VXA.VC);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* sum = f.Extract(vc, uint8_t(j), INT32_TYPE);
+    for (uint32_t k = 0; k < 2; ++k) {
+      uint8_t idx = uint8_t(2 * j + k);
+      Value* a = f.ZeroExtend(f.Extract(va, idx, INT16_TYPE), INT32_TYPE);
+      Value* b = f.ZeroExtend(f.Extract(vb, idx, INT16_TYPE), INT32_TYPE);
+      sum = f.Add(sum, f.Mul(a, b));
+    }
+    result = f.Insert(result, uint64_t(j), sum);
+  }
+  f.StoreVR(i.VXA.VD, result);
+  return 0;
 }
 
 int InstrEmit_vmsumuhs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vmsumuhs VD,VA,VB,VC - Vector Multiply Sum Unsigned Halfword
+  // Saturate. Same lane math as vmsumuhm but computed widened and
+  // unsigned-saturated into VD[j] instead of wrapping. Verified against
+  // QEMU's helper_VMSUMUHS.
+  Value* va = f.LoadVR(i.VXA.VA);
+  Value* vb = f.LoadVR(i.VXA.VB);
+  Value* vc = f.LoadVR(i.VXA.VC);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* sum =
+        f.ZeroExtend(f.Extract(vc, uint8_t(j), INT32_TYPE), INT64_TYPE);
+    for (uint32_t k = 0; k < 2; ++k) {
+      uint8_t idx = uint8_t(2 * j + k);
+      Value* a = f.ZeroExtend(f.Extract(va, idx, INT16_TYPE), INT64_TYPE);
+      Value* b = f.ZeroExtend(f.Extract(vb, idx, INT16_TYPE), INT64_TYPE);
+      sum = f.Add(sum, f.Mul(a, b));
+    }
+    sum = SaturateU32_64b(f, sum);
+    result = f.Insert(result, uint64_t(j), f.Truncate(sum, INT32_TYPE));
+  }
+  f.StoreVR(i.VXA.VD, result);
+  return 0;
 }
 
 int InstrEmit_vmsum3fp128(PPCHIRBuilder& f, const InstrData& i) {
@@ -1068,44 +1254,85 @@ int InstrEmit_vmsum4fp128(PPCHIRBuilder& f, const InstrData& i) {
   return 0;
 }
 
+// Shared body for the byte-element multiply-even/odd family (vmul{e,o}{s,u}b).
+// Reads byte lane (2*j + src_off) from VA/VB for j=0..7, widens each to a
+// 16-bit value (signed or unsigned per `is_signed`), multiplies, and packs
+// the 8 halfword results into VD. src_off=0 selects "even" (byte lanes
+// 0,2,4,...,14), src_off=1 selects "odd" (1,3,5,...,15) - this "index 0 is
+// even" convention, and the even/odd -> output-index-j mapping, is verified
+// against QEMU's VMUL_DO_EVN/VMUL_DO_ODD reference macros rather than from
+// memory, since element-index parity is exactly the kind of detail that's
+// easy to get backwards.
+static int InstrEmit_vmulxb_(PPCHIRBuilder& f, uint32_t vd, uint32_t va,
+                             uint32_t vb, uint32_t src_off, bool is_signed) {
+  Value* va_v = f.LoadVR(va);
+  Value* vb_v = f.LoadVR(vb);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 8; ++j) {
+    uint8_t idx = uint8_t(2 * j + src_off);
+    Value* a = f.Extract(va_v, idx, INT8_TYPE);
+    Value* b = f.Extract(vb_v, idx, INT8_TYPE);
+    a = is_signed ? f.SignExtend(a, INT16_TYPE) : f.ZeroExtend(a, INT16_TYPE);
+    b = is_signed ? f.SignExtend(b, INT16_TYPE) : f.ZeroExtend(b, INT16_TYPE);
+    Value* prod = f.Mul(a, b);
+    result = f.Insert(result, uint64_t(j), prod);
+  }
+  f.StoreVR(vd, result);
+  return 0;
+}
+
+// Shared body for the halfword-element multiply-even/odd family
+// (vmul{e,o}{s,u}h). Same shape as vmulxb_ above but one width up: reads
+// halfword lane (2*j + src_off) for j=0..3, widens to 32 bits, multiplies,
+// packs 4 word results into VD.
+static int InstrEmit_vmulxh_(PPCHIRBuilder& f, uint32_t vd, uint32_t va,
+                             uint32_t vb, uint32_t src_off, bool is_signed) {
+  Value* va_v = f.LoadVR(va);
+  Value* vb_v = f.LoadVR(vb);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    uint8_t idx = uint8_t(2 * j + src_off);
+    Value* a = f.Extract(va_v, idx, INT16_TYPE);
+    Value* b = f.Extract(vb_v, idx, INT16_TYPE);
+    a = is_signed ? f.SignExtend(a, INT32_TYPE) : f.ZeroExtend(a, INT32_TYPE);
+    b = is_signed ? f.SignExtend(b, INT32_TYPE) : f.ZeroExtend(b, INT32_TYPE);
+    Value* prod = f.Mul(a, b);
+    result = f.Insert(result, uint64_t(j), prod);
+  }
+  f.StoreVR(vd, result);
+  return 0;
+}
+
 int InstrEmit_vmulesb(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmulxb_(f, i.VX.VD, i.VX.VA, i.VX.VB, 0, true);
 }
 
 int InstrEmit_vmulesh(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmulxh_(f, i.VX.VD, i.VX.VA, i.VX.VB, 0, true);
 }
 
 int InstrEmit_vmuleub(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmulxb_(f, i.VX.VD, i.VX.VA, i.VX.VB, 0, false);
 }
 
 int InstrEmit_vmuleuh(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmulxh_(f, i.VX.VD, i.VX.VA, i.VX.VB, 0, false);
 }
 
 int InstrEmit_vmulosb(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmulxb_(f, i.VX.VD, i.VX.VA, i.VX.VB, 1, true);
 }
 
 int InstrEmit_vmulosh(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmulxh_(f, i.VX.VD, i.VX.VA, i.VX.VB, 1, true);
 }
 
 int InstrEmit_vmuloub(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmulxb_(f, i.VX.VD, i.VX.VA, i.VX.VB, 1, false);
 }
 
 int InstrEmit_vmulouh(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmulxh_(f, i.VX.VD, i.VX.VA, i.VX.VB, 1, false);
 }
 
 int InstrEmit_vmulfp128(PPCHIRBuilder& f, const InstrData& i) {
