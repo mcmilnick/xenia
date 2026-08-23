@@ -725,21 +725,90 @@ int InstrEmit_lmw(PPCHIRBuilder& f, const InstrData& i) {
 // Integer load and store string (A-17)
 
 int InstrEmit_lswi(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // lswi RT,RA,NB - Load String Word Immediate.
+  // Loads NB bytes (NB=0 means 32) from EA into GPRs starting at RT, 4
+  // bytes per register packed MSB-first, register index wrapping mod 32
+  // after r31. NB is a compile-time immediate (encoded in the X-form RB
+  // field), so the whole thing can be unrolled here. Bytes of a trailing
+  // partial register beyond NB are architecturally undefined on real
+  // hardware; we zero them for determinism, matching lmw/lswi's sibling
+  // instructions elsewhere in this file.
+  Value* b;
+  if (i.X.RA == 0) {
+    b = f.LoadZeroInt64();
+  } else {
+    b = f.LoadGPR(i.X.RA);
+  }
+
+  uint32_t nb = i.X.RB ? i.X.RB : 32;
+  uint32_t rt = i.X.RT;
+  uint32_t byte_offset = 0;
+  while (nb) {
+    uint32_t word_bytes = nb < 4 ? nb : 4;
+    Value* word = f.LoadZeroInt32();
+    for (uint32_t k = 0; k < word_bytes; ++k) {
+      Value* offset = f.LoadConstantInt64(byte_offset + k);
+      Value* byte =
+          f.ZeroExtend(f.LoadOffset(b, offset, INT8_TYPE), INT32_TYPE);
+      word = f.Or(word, f.Shl(byte, int8_t((3 - k) * 8)));
+    }
+    f.StoreGPR(rt, f.ZeroExtend(word, INT64_TYPE));
+    rt = (rt + 1) % 32;
+    byte_offset += word_bytes;
+    nb -= word_bytes;
+  }
+  return 0;
 }
 
 int InstrEmit_lswx(PPCHIRBuilder& f, const InstrData& i) {
+  // lswx RT,RA,RB - Load String Word Indexed.
+  // Same byte-packing semantics as lswi, but the byte count comes from
+  // the low 7 bits of XER at *runtime* (XER[25:31]), not a compile-time
+  // immediate. Correctly emulating that requires either a runtime loop
+  // with dynamically-indexed GPR writes or a host callback into the C++
+  // register file - neither of which any existing pattern in this file
+  // supports (StoreGPR always takes a compile-time-constant register
+  // index). Left unimplemented rather than risk a wrong dynamic-register
+  // encoding; this instruction is essentially never emitted by a
+  // compiler in practice.
   XEINSTRNOTIMPLEMENTED();
   return 1;
 }
 
 int InstrEmit_stswi(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // stswi RT,RA,NB - Store String Word Immediate.
+  // Inverse of lswi: unpacks 4-bytes-per-register, MSB-first, from GPRs
+  // starting at RT out to EA, NB bytes total (NB=0 means 32), wrapping
+  // register index mod 32. NB is a compile-time immediate, so this is
+  // fully unrolled the same way lswi is.
+  Value* b;
+  if (i.X.RA == 0) {
+    b = f.LoadZeroInt64();
+  } else {
+    b = f.LoadGPR(i.X.RA);
+  }
+
+  uint32_t nb = i.X.RB ? i.X.RB : 32;
+  uint32_t rt = i.X.RT;
+  uint32_t byte_offset = 0;
+  while (nb) {
+    uint32_t word_bytes = nb < 4 ? nb : 4;
+    Value* word = f.Truncate(f.LoadGPR(rt), INT32_TYPE);
+    for (uint32_t k = 0; k < word_bytes; ++k) {
+      Value* offset = f.LoadConstantInt64(byte_offset + k);
+      Value* byte = f.Truncate(f.Shr(word, int8_t((3 - k) * 8)), INT8_TYPE);
+      f.StoreOffset(b, offset, byte);
+    }
+    rt = (rt + 1) % 32;
+    byte_offset += word_bytes;
+    nb -= word_bytes;
+  }
+  return 0;
 }
 
 int InstrEmit_stswx(PPCHIRBuilder& f, const InstrData& i) {
+  // stswx RT,RA,RB - Store String Word Indexed. Same runtime-NB-from-XER
+  // problem as lswx above - left unimplemented for the same reason.
   XEINSTRNOTIMPLEMENTED();
   return 1;
 }

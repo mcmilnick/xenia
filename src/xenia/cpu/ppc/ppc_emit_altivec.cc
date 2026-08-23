@@ -1754,29 +1754,124 @@ int InstrEmit_vsubuws(PPCHIRBuilder& f, const InstrData& i) {
   return 0;
 }
 
+// Signed 32-bit saturation bounds, shared by the vsum* family below.
+static Value* SaturateS32_64(PPCHIRBuilder& f, Value* v64) {
+  v64 = f.Max(v64, f.LoadConstantInt64(-2147483648LL));
+  v64 = f.Min(v64, f.LoadConstantInt64(2147483647LL));
+  return v64;
+}
+
 int InstrEmit_vsumsws(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vsumsws VD,VA,VB - Vector Sum across Signed Word Saturate.
+  // sum = VA word0 + word1 + word2 + word3 + VB word3, saturated into VD
+  // word3; VD words 0-2 are zeroed. Verified against QEMU's
+  // helper_vsumsws reference implementation.
+  Value* va = f.LoadVR(i.VX.VA);
+  Value* vb = f.LoadVR(i.VX.VB);
+  Value* sum =
+      f.SignExtend(f.Extract(vb, uint8_t(3), INT32_TYPE), INT64_TYPE);
+  for (uint32_t j = 0; j < 4; ++j) {
+    sum = f.Add(
+        sum, f.SignExtend(f.Extract(va, uint8_t(j), INT32_TYPE), INT64_TYPE));
+  }
+  sum = SaturateS32_64(f, sum);
+  Value* result =
+      f.Insert(f.LoadZeroVec128(), uint64_t(3), f.Truncate(sum, INT32_TYPE));
+  f.StoreVR(i.VX.VD, result);
+  return 0;
 }
 
 int InstrEmit_vsum2sws(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vsum2sws VD,VA,VB - Vector Sum across Partial (1/2) Signed Word
+  // Saturate. For each pair p=0,1: sum = VA word(2p) + VA word(2p+1) +
+  // VB word(2p+1), saturated into VD word(2p+1); VD word(2p) is zeroed.
+  // Verified against QEMU's helper_vsum2sws reference implementation.
+  Value* va = f.LoadVR(i.VX.VA);
+  Value* vb = f.LoadVR(i.VX.VB);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t p = 0; p < 2; ++p) {
+    Value* sum = f.SignExtend(
+        f.Extract(vb, uint8_t(2 * p + 1), INT32_TYPE), INT64_TYPE);
+    sum = f.Add(sum, f.SignExtend(f.Extract(va, uint8_t(2 * p), INT32_TYPE),
+                                  INT64_TYPE));
+    sum = f.Add(sum,
+                f.SignExtend(f.Extract(va, uint8_t(2 * p + 1), INT32_TYPE),
+                            INT64_TYPE));
+    sum = SaturateS32_64(f, sum);
+    result = f.Insert(result, uint64_t(2 * p + 1), f.Truncate(sum, INT32_TYPE));
+  }
+  f.StoreVR(i.VX.VD, result);
+  return 0;
 }
 
 int InstrEmit_vsum4sbs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vsum4sbs VD,VA,VB - Vector Sum across Partial (1/4) Signed Byte
+  // Saturate. For each word lane j: sum = signed word j of VB + the 4
+  // signed bytes of word j of VA, saturated into VD word j. Verified
+  // against QEMU's helper_vsum4sbs reference implementation.
+  Value* va = f.LoadVR(i.VX.VA);
+  Value* vb = f.LoadVR(i.VX.VB);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* sum =
+        f.SignExtend(f.Extract(vb, uint8_t(j), INT32_TYPE), INT64_TYPE);
+    for (uint32_t k = 0; k < 4; ++k) {
+      sum = f.Add(sum, f.SignExtend(f.Extract(va, uint8_t(4 * j + k),
+                                              INT8_TYPE),
+                                    INT64_TYPE));
+    }
+    sum = SaturateS32_64(f, sum);
+    result = f.Insert(result, uint64_t(j), f.Truncate(sum, INT32_TYPE));
+  }
+  f.StoreVR(i.VX.VD, result);
+  return 0;
 }
 
 int InstrEmit_vsum4shs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vsum4shs VD,VA,VB - Vector Sum across Partial (1/4) Signed Halfword
+  // Saturate. For each word lane j: sum = signed word j of VB + the 2
+  // signed halfwords of word j of VA, saturated into VD word j. Verified
+  // against QEMU's helper_vsum4shs reference implementation.
+  Value* va = f.LoadVR(i.VX.VA);
+  Value* vb = f.LoadVR(i.VX.VB);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* sum =
+        f.SignExtend(f.Extract(vb, uint8_t(j), INT32_TYPE), INT64_TYPE);
+    sum = f.Add(sum, f.SignExtend(f.Extract(va, uint8_t(2 * j), INT16_TYPE),
+                                  INT64_TYPE));
+    sum = f.Add(sum,
+                f.SignExtend(f.Extract(va, uint8_t(2 * j + 1), INT16_TYPE),
+                            INT64_TYPE));
+    sum = SaturateS32_64(f, sum);
+    result = f.Insert(result, uint64_t(j), f.Truncate(sum, INT32_TYPE));
+  }
+  f.StoreVR(i.VX.VD, result);
+  return 0;
 }
 
 int InstrEmit_vsum4ubs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vsum4ubs VD,VA,VB - Vector Sum across Partial (1/4) Unsigned Byte
+  // Saturate. For each word lane j: sum = unsigned word j of VB + the 4
+  // unsigned bytes of word j of VA, saturated (to uint32) into VD word
+  // j. Verified against QEMU's helper_vsum4ubs reference implementation.
+  Value* va = f.LoadVR(i.VX.VA);
+  Value* vb = f.LoadVR(i.VX.VB);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* sum =
+        f.ZeroExtend(f.Extract(vb, uint8_t(j), INT32_TYPE), INT64_TYPE);
+    for (uint32_t k = 0; k < 4; ++k) {
+      sum = f.Add(sum, f.ZeroExtend(f.Extract(va, uint8_t(4 * j + k),
+                                              INT8_TYPE),
+                                    INT64_TYPE));
+    }
+    sum = f.Max(sum, f.LoadConstantInt64(0));
+    sum = f.Min(sum, f.LoadConstantInt64(4294967295LL));
+    result = f.Insert(result, uint64_t(j), f.Truncate(sum, INT32_TYPE));
+  }
+  f.StoreVR(i.VX.VD, result);
+  return 0;
 }
 
 static Value* vkpkx_in_low(PPCHIRBuilder& f, Value* input) {
@@ -1985,14 +2080,41 @@ int InstrEmit_vpkuwus128(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vpkuwus_(f, VX128_VD128, VX128_VA128, VX128_VB128);
 }
 
+// Shared body for vupkhpx/vupklpx: expands 4 "1.5.5.5" pixel16 halfwords
+// (bit 15=alpha, 14:10=r, 9:5=g, 4:0=b) starting at src_base into 4
+// ARGB8888-style words. Alpha bit is sign-extended to a full byte (0xFF
+// or 0x00); each 5-bit color field is zero-extended into its own byte
+// (top 3 bits 0, not rescaled to 8-bit). Verified against QEMU's
+// helper_vupkhpx/helper_vupklpx reference implementation.
+static int InstrEmit_vupkpx_(PPCHIRBuilder& f, uint32_t vd, uint32_t vb,
+                             uint32_t src_base) {
+  Value* vb_v = f.LoadVR(vb);
+  Value* result = f.LoadZeroVec128();
+  for (uint32_t j = 0; j < 4; ++j) {
+    Value* h = f.ZeroExtend(
+        f.Extract(vb_v, uint8_t(src_base + j), INT16_TYPE), INT32_TYPE);
+    Value* alpha = f.And(f.Sha(f.Shl(h, int8_t(16)), int8_t(31)),
+                         f.LoadConstantUint32(0xFF000000u));
+    Value* r = f.Shl(f.And(f.Shr(h, int8_t(10)), f.LoadConstantUint32(0x1Fu)),
+                     int8_t(16));
+    Value* g = f.Shl(f.And(f.Shr(h, int8_t(5)), f.LoadConstantUint32(0x1Fu)),
+                     int8_t(8));
+    Value* b = f.And(h, f.LoadConstantUint32(0x1Fu));
+    Value* word = f.Or(f.Or(alpha, r), f.Or(g, b));
+    result = f.Insert(result, uint64_t(j), word);
+  }
+  f.StoreVR(vd, result);
+  return 0;
+}
+
 int InstrEmit_vupkhpx(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vupkhpx VD,VB - reads the first 4 (high) pixel16 halfwords of VB.
+  return InstrEmit_vupkpx_(f, i.VX.VD, i.VX.VB, 0);
 }
 
 int InstrEmit_vupklpx(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // vupklpx VD,VB - reads the last 4 (low) pixel16 halfwords of VB.
+  return InstrEmit_vupkpx_(f, i.VX.VD, i.VX.VB, 4);
 }
 
 int InstrEmit_vupkhsh_(PPCHIRBuilder& f, uint32_t vd, uint32_t vb) {

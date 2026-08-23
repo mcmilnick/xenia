@@ -404,13 +404,29 @@ int InstrEmit_mffsx(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_mtfsb0x(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // mtfsb0 crbD - clears bit crbD of the FPSCR.
+  // FPSCR bits are numbered left to right (0-31), so bit crbD is
+  // (31 - crbD) from the right.
+  uint32_t crbd = i.X.RT;
+  uint32_t mask = ~(1u << (31 - crbd));
+  Value* fpscr = f.LoadFPSCR();
+  f.StoreFPSCR(f.And(fpscr, f.LoadConstantUint32(mask)));
+  if (i.X.Rc) {
+    f.CopyFPSCRToCR1();
+  }
+  return 0;
 }
 
 int InstrEmit_mtfsb1x(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // mtfsb1 crbD - sets bit crbD of the FPSCR.
+  uint32_t crbd = i.X.RT;
+  uint32_t mask = 1u << (31 - crbd);
+  Value* fpscr = f.LoadFPSCR();
+  f.StoreFPSCR(f.Or(fpscr, f.LoadConstantUint32(mask)));
+  if (i.X.Rc) {
+    f.CopyFPSCRToCR1();
+  }
+  return 0;
 }
 
 int InstrEmit_mtfsfx(PPCHIRBuilder& f, const InstrData& i) {

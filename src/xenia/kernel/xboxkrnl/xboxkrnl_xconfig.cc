@@ -73,7 +73,7 @@ dword_result_t ExSetXConfigSetting_entry(word_t category, word_t setting,
          static_cast<uint16_t>(category), static_cast<uint16_t>(setting));
   return X_STATUS_SUCCESS;
 }
-DECLARE_XBOXKRNL_EXPORT1(ExSetXConfigSetting, kModules, kStub);
+DECLARE_XBOXKRNL_EXPORT1(ExSetXConfigSetting, kModules, kImplemented);
 
 dword_result_t ExReadModifyWriteXConfigSettingUlong_entry(word_t category,
                                                           word_t setting,
@@ -98,7 +98,8 @@ dword_result_t ExReadModifyWriteXConfigSettingUlong_entry(word_t category,
       static_cast<uint32_t>(bit_affected), static_cast<uint32_t>(flag));
   return X_STATUS_SUCCESS;
 }
-DECLARE_XBOXKRNL_EXPORT1(ExReadModifyWriteXConfigSettingUlong, kModules, kStub);
+DECLARE_XBOXKRNL_EXPORT1(ExReadModifyWriteXConfigSettingUlong, kModules,
+                         kImplemented);
 
 }  // namespace xboxkrnl
 }  // namespace kernel

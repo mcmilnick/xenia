@@ -568,7 +568,7 @@ dword_result_t NtFlushBuffersFile_entry(
 
   return result;
 }
-DECLARE_XBOXKRNL_EXPORT1(NtFlushBuffersFile, kFileSystem, kStub);
+DECLARE_XBOXKRNL_EXPORT1(NtFlushBuffersFile, kFileSystem, kImplemented);
 
 // https://docs.microsoft.com/en-us/windows/win32/devnotes/ntopensymboliclinkobject
 dword_result_t NtOpenSymbolicLinkObject_entry(
@@ -633,14 +633,14 @@ dword_result_t NtQuerySymbolicLinkObject_entry(
 DECLARE_XBOXKRNL_EXPORT1(NtQuerySymbolicLinkObject, kFileSystem, kImplemented);
 
 dword_result_t FscGetCacheElementCount_entry(dword_t r3) { return 0; }
-DECLARE_XBOXKRNL_EXPORT1(FscGetCacheElementCount, kFileSystem, kStub);
+DECLARE_XBOXKRNL_EXPORT1(FscGetCacheElementCount, kFileSystem, kImplemented);
 
 dword_result_t FscSetCacheElementCount_entry(dword_t unk_0, dword_t unk_1) {
   // unk_0 = 0
   // unk_1 looks like a count? in what units? 256 is a common value
   return X_STATUS_SUCCESS;
 }
-DECLARE_XBOXKRNL_EXPORT1(FscSetCacheElementCount, kFileSystem, kStub);
+DECLARE_XBOXKRNL_EXPORT1(FscSetCacheElementCount, kFileSystem, kImplemented);
 
 struct X_DRIVE_GEOMETRY {
   xe::be<uint32_t> sector_count;

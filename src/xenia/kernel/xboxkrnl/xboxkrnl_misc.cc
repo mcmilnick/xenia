@@ -73,7 +73,7 @@ void KeEnableFpuExceptions_entry(
       ctx->TranslateVirtualGPR<X_KPCR*>(ctx->r[13])->prcb_data.current_thread);
   kthread->fpu_exceptions_on = static_cast<uint32_t>(ctx->r[3]) != 0;
 }
-DECLARE_XBOXKRNL_EXPORT1(KeEnableFpuExceptions, kNone, kStub);
+DECLARE_XBOXKRNL_EXPORT1(KeEnableFpuExceptions, kNone, kImplemented);
 
 void KeSaveFloatingPointState_entry(const ppc_context_t& ctx) {
   // Probably we should use: thread_fpu_related to store/restore state

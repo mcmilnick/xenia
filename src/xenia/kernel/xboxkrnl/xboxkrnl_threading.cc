@@ -1622,7 +1622,7 @@ dword_result_t KiApcNormalRoutineNop_entry(dword_t unk0 /* output? */,
                                            dword_t unk1 /* 0x13 */) {
   return 0;
 }
-DECLARE_XBOXKRNL_EXPORT1(KiApcNormalRoutineNop, kThreading, kStub);
+DECLARE_XBOXKRNL_EXPORT1(KiApcNormalRoutineNop, kThreading, kImplemented);
 
 void KeInitializeDpc_entry(pointer_t<XDPC> dpc, lpvoid_t routine,
                            lpvoid_t context) {
