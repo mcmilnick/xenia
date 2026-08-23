@@ -462,6 +462,11 @@ DECLARE_XBOXKRNL_EXPORT2(NtRemoveIoCompletion, kFileSystem, kImplemented,
                          kHighFrequency);
 
 dword_result_t NtCancelIoFile_entry(dword_t handle) {
+  // NtReadFile/NtWriteFile always take the synchronous path right now
+  // (`if (true || file->is_synchronous())`, async path not implemented
+  // yet), so there is never an actual in-flight async op for this to
+  // cancel by the time guest code could call it - validating the handle
+  // and succeeding is the correct behavior for the current I/O model.
   auto file = kernel_state()->object_table()->LookupObject<XFile>(handle);
   if (!file) {
     return X_STATUS_INVALID_HANDLE;
@@ -469,7 +474,7 @@ dword_result_t NtCancelIoFile_entry(dword_t handle) {
 
   return X_STATUS_SUCCESS;
 }
-DECLARE_XBOXKRNL_EXPORT1(NtCancelIoFile, kFileSystem, kStub);
+DECLARE_XBOXKRNL_EXPORT1(NtCancelIoFile, kFileSystem, kImplemented);
 
 dword_result_t NtQueryFullAttributesFile_entry(
     pointer_t<X_OBJECT_ATTRIBUTES> obj_attribs,
@@ -690,7 +695,7 @@ dword_result_t NtDeviceIoControlFile_entry(
 
   return X_STATUS_SUCCESS;
 }
-DECLARE_XBOXKRNL_EXPORT1(NtDeviceIoControlFile, kFileSystem, kStub);
+DECLARE_XBOXKRNL_EXPORT1(NtDeviceIoControlFile, kFileSystem, kImplemented);
 // device_extension_size = additional bytes of data (aligned up to 8 byte
 // granularity) that will be allocated at the tail of the resulting device
 // object. although it is allocated at the tail, it is accessed through a
