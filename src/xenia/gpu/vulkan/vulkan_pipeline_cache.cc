@@ -59,6 +59,9 @@ DEFINE_int32(
     "the number of threads explicitly (up to the number of logical CPU cores), "
     "0 to disable multithreaded pipeline creation.",
     "Vulkan");
+
+DECLARE_bool(spirv_disable_rounding_mode_rte);
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -83,9 +86,16 @@ bool VulkanPipelineCache::Initialize() {
       render_target_cache_.GetPath() ==
       RenderTargetCache::Path::kPixelShaderInterlock;
 
+  // Cache device float control features for geometry shader creation.
+  const SpirvShaderTranslator::Features features(vulkan_device);
+  signed_zero_inf_nan_preserve_float32_ =
+      features.signed_zero_inf_nan_preserve_float32;
+  denorm_flush_to_zero_float32_ = features.denorm_flush_to_zero_float32;
+  rounding_mode_rte_float32_ = features.rounding_mode_rte_float32 &&
+                               !cvars::spirv_disable_rounding_mode_rte;
+
   shader_translator_ = std::make_unique<SpirvShaderTranslator>(
-      SpirvShaderTranslator::Features(vulkan_device),
-      render_target_cache_.msaa_2x_attachments_supported(),
+      features, render_target_cache_.msaa_2x_attachments_supported(),
       render_target_cache_.msaa_2x_no_attachments_supported(),
       edram_fragment_shader_interlock,
       render_target_cache_.draw_resolution_scale_x(),
@@ -408,6 +418,12 @@ VulkanPipelineCache::GetCurrentVertexShaderModification(
           host_vertex_shader_type));
 
   modification.vertex.interpolator_mask = interpolator_mask;
+
+  // Tessellation mode selects the domain shader spacing.
+  if (Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type)) {
+    modification.vertex.tessellation_mode =
+        regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
+  }
 
   // User clip planes.
   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
@@ -1113,15 +1129,37 @@ void VulkanPipelineCache::WritePipelineRenderTargetDescription(
         /* 15 */ PipelineBlendFactor::kOneMinusConstantAlpha,
         /* 16 */ PipelineBlendFactor::kSrcAlphaSaturate,
     };
+    // Like kBlendFactorMap, but with the color factors changed to their alpha
+    // equivalents. Alpha is scalar, so hardware treats a _COLOR factor in the
+    // alpha slot as the matching _ALPHA factor.
+    static constexpr PipelineBlendFactor kBlendFactorAlphaMap[32] = {
+        /*  0 */ PipelineBlendFactor::kZero,
+        /*  1 */ PipelineBlendFactor::kOne,
+        /*  2 */ PipelineBlendFactor::kZero,  // ?
+        /*  3 */ PipelineBlendFactor::kZero,  // ?
+        /*  4 */ PipelineBlendFactor::kSrcAlpha,
+        /*  5 */ PipelineBlendFactor::kOneMinusSrcAlpha,
+        /*  6 */ PipelineBlendFactor::kSrcAlpha,
+        /*  7 */ PipelineBlendFactor::kOneMinusSrcAlpha,
+        /*  8 */ PipelineBlendFactor::kDstAlpha,
+        /*  9 */ PipelineBlendFactor::kOneMinusDstAlpha,
+        /* 10 */ PipelineBlendFactor::kDstAlpha,
+        /* 11 */ PipelineBlendFactor::kOneMinusDstAlpha,
+        /* 12 */ PipelineBlendFactor::kConstantAlpha,
+        /* 13 */ PipelineBlendFactor::kOneMinusConstantAlpha,
+        /* 14 */ PipelineBlendFactor::kConstantAlpha,
+        /* 15 */ PipelineBlendFactor::kOneMinusConstantAlpha,
+        /* 16 */ PipelineBlendFactor::kSrcAlphaSaturate,
+    };
     render_target_out.src_color_blend_factor =
         kBlendFactorMap[uint32_t(blend_control.color_srcblend)];
     render_target_out.dst_color_blend_factor =
         kBlendFactorMap[uint32_t(blend_control.color_destblend)];
     render_target_out.color_blend_op = blend_control.color_comb_fcn;
     render_target_out.src_alpha_blend_factor =
-        kBlendFactorMap[uint32_t(blend_control.alpha_srcblend)];
+        kBlendFactorAlphaMap[uint32_t(blend_control.alpha_srcblend)];
     render_target_out.dst_alpha_blend_factor =
-        kBlendFactorMap[uint32_t(blend_control.alpha_destblend)];
+        kBlendFactorAlphaMap[uint32_t(blend_control.alpha_destblend)];
     render_target_out.alpha_blend_op = blend_control.alpha_comb_fcn;
     if (!command_processor_.GetVulkanDevice()
              ->properties()
@@ -1572,7 +1610,25 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
   builder.setMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
   builder.setSource(spv::SourceLanguageUnknown, 0);
 
-  // TODO(Triang3l): Shader float controls (NaN preservation most importantly).
+  // Match the vertex and pixel shaders' float controls. NaN preservation most
+  // importantly keeps the NaN-position primitive discard below (used for the
+  // vertex kill "or" operator and degenerate rectangles) from being folded
+  // away. The geometry shader is built as SPIR-V 1.0, where the float controls
+  // are an extension. The execution modes are added once the entry point
+  // exists.
+  if (denorm_flush_to_zero_float32_ || signed_zero_inf_nan_preserve_float32_ ||
+      rounding_mode_rte_float32_) {
+    builder.addExtension("SPV_KHR_float_controls");
+  }
+  if (denorm_flush_to_zero_float32_) {
+    builder.addCapability(spv::CapabilityDenormFlushToZero);
+  }
+  if (signed_zero_inf_nan_preserve_float32_) {
+    builder.addCapability(spv::CapabilitySignedZeroInfNanPreserve);
+  }
+  if (rounding_mode_rte_float32_) {
+    builder.addCapability(spv::CapabilityRoundingModeRTE);
+  }
 
   std::vector<spv::Id> main_interface;
 
@@ -1819,6 +1875,18 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
   builder.addExecutionMode(main_function, output_primitive_execution_mode);
   builder.addExecutionMode(main_function, spv::ExecutionModeOutputVertices,
                            int(output_max_vertices));
+  if (denorm_flush_to_zero_float32_) {
+    builder.addExecutionMode(main_function, spv::ExecutionModeDenormFlushToZero,
+                             32);
+  }
+  if (signed_zero_inf_nan_preserve_float32_) {
+    builder.addExecutionMode(main_function,
+                             spv::ExecutionModeSignedZeroInfNanPreserve, 32);
+  }
+  if (rounding_mode_rte_float32_) {
+    builder.addExecutionMode(main_function, spv::ExecutionModeRoundingModeRTE,
+                             32);
+  }
 
   // Note that after every OpEmitVertex, all output variables are undefined.
 

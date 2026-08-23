@@ -1402,6 +1402,22 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
       texture_cache_->TextureFetchConstantWritten(
           (index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 6);
     }
+  } else if (index == XE_GPU_REG_VGT_MAX_VTX_INDX ||
+             index == XE_GPU_REG_VGT_MIN_VTX_INDX ||
+             index == XE_GPU_REG_VGT_INDX_OFFSET ||
+             index == XE_GPU_REG_VGT_DMA_SIZE ||
+             index == XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL ||
+             index == XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) {
+    // Source registers for the tessellation constant buffer. Invalidate it so
+    // the factor range and index parameters are refreshed per draw instead of
+    // staying stale from the first draw of the submission.
+    current_constant_buffers_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferTessellation);
+  } else if ((index >= XE_GPU_REG_PA_CL_UCP_0_X &&
+              index <= XE_GPU_REG_PA_CL_UCP_5_W) ||
+             index == XE_GPU_REG_PA_CL_CLIP_CNTL) {
+    current_constant_buffers_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferClipPlanes);
   }
 }
 void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index,
@@ -2376,6 +2392,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return IssueCopy();
   }
 
+  if (regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == 0) {
+    // Doesn't actually draw. Matches the Direct3D 12 backend.
+    // TODO(Triang3l): Do something so memexport still works in this case maybe?
+    // Unlikely that zero would even really be legal though.
+    return true;
+  }
+
   const ui::vulkan::VulkanDevice::Properties& device_properties =
       GetVulkanDevice()->properties();
 
@@ -2748,6 +2771,18 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vgt_draw_initiator.index_size == xenos::IndexFormat::kInt32 &&
       primitive_processing_result.host_vertex_shader_type ==
           Shader::HostVertexShaderType::kVertex;
+
+  // The tessellation vertex index endian is a per-draw value from the
+  // primitive processor rather than a register, kNone for auto draws whose
+  // factors were already converted on the host. A change between draws must
+  // invalidate the tessellation constant buffer explicitly.
+  if (current_tessellation_index_endian_ !=
+      primitive_processing_result.host_shader_index_endian) {
+    current_tessellation_index_endian_ =
+        primitive_processing_result.host_shader_index_endian;
+    current_constant_buffers_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferTessellation);
+  }
 
   // Update system constants before uploading them.
   UpdateSystemConstantValues(
@@ -4677,8 +4712,9 @@ void VulkanCommandProcessor::UpdateDynamicState(
           stencil_ref_mask_back_reg = XE_GPU_REG_RB_STENCILREFMASK_BF;
         } else {
           // Choose the back face values only if drawing only back faces.
+          auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
           stencil_ref_mask_front_reg =
-              regs.Get<reg::PA_SU_SC_MODE_CNTL>().cull_front
+              (pa_su_sc_mode_cntl.cull_front && !pa_su_sc_mode_cntl.cull_back)
                   ? XE_GPU_REG_RB_STENCILREFMASK_BF
                   : XE_GPU_REG_RB_STENCILREFMASK;
           stencil_ref_mask_back_reg = stencil_ref_mask_front_reg;
@@ -5490,10 +5526,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       tessellation_constants.tessellation_factor_range[1] = tess_factor_max;
       tessellation_constants.padding0[0] = 0.0f;
       tessellation_constants.padding0[1] = 0.0f;
-      // Vertex index processing parameters for tessellation shaders.
-      auto vgt_dma_size = regs.Get<reg::VGT_DMA_SIZE>();
+      // Vertex index processing parameters for tessellation shaders. The
+      // endian comes from the primitive processor, not raw
+      // VGT_DMA_SIZE.swap_mode. Auto draws read factors the host has already
+      // byte swapped, so swapping them again in the hull shader corrupted every
+      // adaptive factor.
       tessellation_constants.vertex_index_endian =
-          static_cast<uint32_t>(vgt_dma_size.swap_mode);
+          static_cast<uint32_t>(current_tessellation_index_endian_);
       tessellation_constants.vertex_index_offset =
           regs[XE_GPU_REG_VGT_INDX_OFFSET];
       tessellation_constants.vertex_index_min_max[0] =

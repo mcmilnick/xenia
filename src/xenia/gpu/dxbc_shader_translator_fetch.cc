@@ -147,13 +147,40 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
     address_src = address_temp_src;
   }
 
+  // Words at or past the end of the fetch buffer must read as 0. The shared
+  // memory binding covers all of physical memory, so a word out of bounds
+  // would load unrelated guest data where the hardware clamps and returns
+  // zeros. Games rely on that. An overallocated draw expects the vertices it
+  // never wrote to collapse into degenerate primitives. Compute the exclusive
+  // end of the buffer in bytes from the fetch constant and a mask of which
+  // words of the element fall inside it.
+  uint32_t bounds_temp = PushSystemTemp(0, 2);
+  uint32_t word_mask_temp = bounds_temp + 1;
+  // bounds_temp.x = buffer size in words (bits 2:25 of the second fetch
+  // constant word).
+  a_.OpUBFE(dxbc::Dest::R(bounds_temp, 0b0001), dxbc::Src::LU(24),
+            dxbc::Src::LU(2), fetch_constant_src.SelectFromSwizzled(1));
+  // bounds_temp.y = base address of the buffer in bytes.
+  a_.OpAnd(dxbc::Dest::R(bounds_temp, 0b0010),
+           fetch_constant_src.SelectFromSwizzled(0),
+           dxbc::Src::LU(~uint32_t(3)));
+  // bounds_temp.x = exclusive end of the buffer in bytes.
+  a_.OpUMAd(dxbc::Dest::R(bounds_temp, 0b0001),
+            dxbc::Src::R(bounds_temp, dxbc::Src::kXXXX), dxbc::Src::LU(4),
+            dxbc::Src::R(bounds_temp, dxbc::Src::kYYYY));
+  // word_mask_temp = byte addresses of the words of the element.
+  a_.OpIAdd(dxbc::Dest::R(word_mask_temp), address_src,
+            dxbc::Src::LI((0 - int32_t(first_word_index)) * 4,
+                          (1 - int32_t(first_word_index)) * 4,
+                          (2 - int32_t(first_word_index)) * 4,
+                          (3 - int32_t(first_word_index)) * 4));
+  // word_mask_temp = whether each word is within the buffer bounds.
+  a_.OpULT(dxbc::Dest::R(word_mask_temp, needed_words),
+           dxbc::Src::R(word_mask_temp),
+           dxbc::Src::R(bounds_temp, dxbc::Src::kXXXX));
+
   // - Load needed words to system_temp_result_, words 0, 1, 2, 3 to X, Y, Z, W
   //   respectively.
-
-  // FIXME(Triang3l): Bound checking is not done here, but haven't encountered
-  // any games relying on out-of-bounds access. On Adreno 200 on Android (LG
-  // P705), however, words (not full elements) out of glBufferData bounds
-  // contain 0.
 
   // Loading the FXC way, Load4.xyw becomes Load2 and Load - would be a
   // compromise between AMD, where there are load_dwordx2/3/4, and Nvidia, where
@@ -223,6 +250,10 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
     }
   }
   a_.OpEndIf();
+
+  a_.OpAnd(dxbc::Dest::R(system_temp_result_, needed_words),
+           dxbc::Src::R(system_temp_result_), dxbc::Src::R(word_mask_temp));
+  PopSystemTemp(2);
 
   dxbc::Src result_src(dxbc::Src::R(system_temp_result_));
 
@@ -854,7 +885,10 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
         size_needed_components |= 0b0001;
         break;
       case xenos::FetchOpDimension::k2D:
-        if (instr.attributes.unnormalized_coordinates) {
+        // A tfetch1D promoted by its source swizzle may still use a 1D fetch
+        // constant. Its size interpretation is selected below at runtime.
+        if (instr.dimension == xenos::FetchOpDimension::k1D ||
+            instr.attributes.unnormalized_coordinates) {
           size_needed_components |= 0b0011;
         }
         break;
@@ -906,6 +940,26 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
         a_.OpUBFE(dxbc::Dest::R(size_and_is_3d_temp, size_needed_components),
                   dxbc::Src::LU(13, 13, 0, 0), dxbc::Src::LU(0, 13, 0, 0),
                   RequestTextureFetchConstantWord(tfetch_index, 2));
+        if (instr.dimension == xenos::FetchOpDimension::k1D) {
+          assert_true((size_needed_components & 0b0011) == 0b0011);
+          size_1d_width_minus_1_temp = PushSystemTemp();
+          a_.OpUBFE(dxbc::Dest::R(size_1d_width_minus_1_temp, 0b0001),
+                    dxbc::Src::LU(xenos::kTexture1DMaxWidthLog2),
+                    dxbc::Src::LU(0),
+                    RequestTextureFetchConstantWord(tfetch_index, 2));
+          a_.OpMov(dxbc::Dest::R(size_1d_width_minus_1_temp, 0b0010),
+                   dxbc::Src::LU(0));
+          a_.OpUBFE(dxbc::Dest::R(size_and_is_3d_temp, 0b1000),
+                    dxbc::Src::LU(2), dxbc::Src::LU(9),
+                    RequestTextureFetchConstantWord(tfetch_index, 5));
+          a_.OpIEq(dxbc::Dest::R(size_and_is_3d_temp, 0b1000),
+                   dxbc::Src::R(size_and_is_3d_temp, dxbc::Src::kWWWW),
+                   dxbc::Src::LU(uint32_t(xenos::DataDimension::k1D)));
+          a_.OpMovC(dxbc::Dest::R(size_and_is_3d_temp, 0b0011),
+                    dxbc::Src::R(size_and_is_3d_temp, dxbc::Src::kWWWW),
+                    dxbc::Src::R(size_1d_width_minus_1_temp),
+                    dxbc::Src::R(size_and_is_3d_temp));
+        }
         break;
       case xenos::FetchOpDimension::k3DOrStacked:
         // tfetch3D is used for both stacked and 3D - first, check if 3D.
@@ -1231,7 +1285,7 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
         }
       }
     }
-    switch (coordinate_dimension) {
+    switch (instr.dimension) {
       case xenos::FetchOpDimension::k1D: {
         // Check if the fetch constant's actual dimension is k1D (word 5, bits
         // 9-10). If not, skip wide 1D handling as size bits differ per
@@ -1284,6 +1338,9 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
                    dxbc::Src::LF(float(xenos::kTexture2DCubeMaxWidthHeight)));
           a_.OpRoundPI(dxbc::Dest::R(coord_and_sampler_temp, 0b0100),
                        dxbc::Src::R(coord_and_sampler_temp, dxbc::Src::kZZZZ));
+          a_.OpMin(dxbc::Dest::R(coord_and_sampler_temp, 0b0100),
+                   dxbc::Src::R(coord_and_sampler_temp, dxbc::Src::kZZZZ),
+                   dxbc::Src::LF(float(xenos::kTexture1DWideMaxRows)));
           // coord.y = (row_index + 0.5) / num_rows - sample at the center of
           // the row, not its edge. At the edge, linear filtering would blend
           // 50/50 with the previous row (texels 8192 apart), and even point
@@ -1302,15 +1359,23 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
         a_.OpElse();
         {
           // Normal 1D texture - pad to 2D array coordinates.
-          a_.OpMov(dxbc::Dest::R(coord_and_sampler_temp, 0b0110),
-                   dxbc::Src::LF(0.0f));
+          a_.OpMov(
+              dxbc::Dest::R(coord_and_sampler_temp,
+                            coordinate_dimension == xenos::FetchOpDimension::k1D
+                                ? 0b0110
+                                : 0b0100),
+              dxbc::Src::LF(0.0f));
         }
         a_.OpEndIf();
         a_.OpElse();
         {
-          // Non-1D texture bound to 1D fetch - just pad coordinates.
-          a_.OpMov(dxbc::Dest::R(coord_and_sampler_temp, 0b0110),
-                   dxbc::Src::LF(0.0f));
+          // Keep Y when the source swizzle promoted the fetch to 2D.
+          a_.OpMov(
+              dxbc::Dest::R(coord_and_sampler_temp,
+                            coordinate_dimension == xenos::FetchOpDimension::k1D
+                                ? 0b0110
+                                : 0b0100),
+              dxbc::Src::LF(0.0f));
         }
         a_.OpEndIf();
       } break;

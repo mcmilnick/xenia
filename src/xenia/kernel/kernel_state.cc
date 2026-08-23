@@ -835,9 +835,9 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module,
                          xe::countof(args));
   }
 
-  auto iter = std::find_if(
-      user_modules_.begin(), user_modules_.end(),
-      [&module](const auto& e) { return e->path() == module->path(); });
+  auto iter = std::ranges::find_if(user_modules_, [&module](const auto& e) {
+    return e->path() == module->path();
+  });
   assert_true(iter != user_modules_.end());  // Unloading an unregistered module
                                              // is probably really bad
   user_modules_.erase(iter);
@@ -1535,7 +1535,7 @@ void KernelState::InitializeKernelGuestGlobals() {
 
   // init unknown object
 
-  block->XboxKernelDefaultObject.type = DISPATCHER_AUTO_RESET_EVENT;
+  block->XboxKernelDefaultObject.type = EventSynchronizationObject;
   block->XboxKernelDefaultObject.signal_state = 1;
   block->XboxKernelDefaultObject.wait_list.flink_ptr =
       oddobject_offset + offsetof(X_DISPATCH_HEADER, wait_list.flink_ptr);

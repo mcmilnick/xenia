@@ -373,7 +373,7 @@ const std::unique_ptr<vfs::Device> Emulator::CreateVfsDevice(
     case FileSignatureType::XEX0:
     case FileSignatureType::XEXQ:
     case FileSignatureType::XEXH:
-    case FileSignatureType::XEXP:
+    case FileSignatureType::XEX25:
     case FileSignatureType::XEX1:
     case FileSignatureType::XEX2:
     case FileSignatureType::ELF: {
@@ -499,8 +499,8 @@ Emulator::FileSignatureType Emulator::GetFileSignature(
       return FileSignatureType::XEXQ;
     case xe::cpu::kXEXHSignature:
       return FileSignatureType::XEXH;
-    case xe::cpu::kXEXPSignature:
-      return FileSignatureType::XEXP;
+    case xe::cpu::kXEX25Signature:
+      return FileSignatureType::XEX25;
     case xe::cpu::kXEX1Signature:
       return FileSignatureType::XEX1;
     case xe::cpu::kXEX2Signature:
@@ -560,7 +560,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
     case FileSignatureType::XEX0:
     case FileSignatureType::XEXQ:
     case FileSignatureType::XEXH:
-    case FileSignatureType::XEXP:
+    case FileSignatureType::XEX25:
     case FileSignatureType::XEX1:
     case FileSignatureType::XEX2:
     case FileSignatureType::ELF: {
@@ -1398,9 +1398,8 @@ void Emulator::AddGameConfigLoadCallback(GameConfigLoadCallback* callback) {
   assert_true(!display_window_ ||
               display_window_->app_context().IsInUIThread());
   // Check if already added.
-  if (std::find(game_config_load_callbacks_.cbegin(),
-                game_config_load_callbacks_.cend(),
-                callback) != game_config_load_callbacks_.cend()) {
+  if (std::ranges::find(std::as_const(game_config_load_callbacks_), callback) !=
+      game_config_load_callbacks_.cend()) {
     return;
   }
   game_config_load_callbacks_.push_back(callback);
@@ -1411,8 +1410,8 @@ void Emulator::RemoveGameConfigLoadCallback(GameConfigLoadCallback* callback) {
   // Game config load callbacks handling is entirely in the UI thread.
   assert_true(!display_window_ ||
               display_window_->app_context().IsInUIThread());
-  auto it = std::find(game_config_load_callbacks_.cbegin(),
-                      game_config_load_callbacks_.cend(), callback);
+  auto it =
+      std::ranges::find(std::as_const(game_config_load_callbacks_), callback);
   if (it == game_config_load_callbacks_.cend()) {
     return;
   }
