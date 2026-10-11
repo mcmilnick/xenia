@@ -111,6 +111,12 @@ game tries to draw (up until a VdSwap call). The file can be used immediately.
 Passing `--trace_gpu_stream` will write all frames rendered to a file, allowing
 you to seek through them in the trace viewer. These files will get large.
 
+### Draw Dumps
+
+Passing `--dump_draws_path=path/` makes F4 write the raw vertex, index, texture
+and shader constant data of every draw in the next frame, for extracting meshes
+and textures with external scripts. See [draw_dump.md](draw_dump.md).
+
 ## References
 
 ### Command Buffer/Registers

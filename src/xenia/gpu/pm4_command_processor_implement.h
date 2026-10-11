@@ -430,6 +430,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
         break;
       case PM4_XE_SWAP:
         result = COMMAND_PROCESSOR::ExecutePacketType3_XE_SWAP(packet, count);
+        draw_dump::OnSwap(counter_);
         break;
       case PM4_INDIRECT_BUFFER:
       case PM4_INDIRECT_BUFFER_PFD:

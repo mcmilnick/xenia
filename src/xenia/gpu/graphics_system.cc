@@ -17,6 +17,7 @@
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
 #include "xenia/gpu/command_processor.h"
+#include "xenia/gpu/draw_dump.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/ui/graphics_provider.h"
@@ -442,6 +443,10 @@ void GraphicsSystem::InitializeShaderStorage(
 }
 
 void GraphicsSystem::RequestFrameTrace() {
+  if (draw_dump::IsEnabled()) {
+    draw_dump::Request();
+    return;
+  }
   command_processor_->RequestFrameTrace(cvars::trace_gpu_prefix);
 }
 

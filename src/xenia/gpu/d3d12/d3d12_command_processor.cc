@@ -19,6 +19,7 @@
 #include "xenia/emulator.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #include "xenia/gpu/d3d12/d3d12_shader.h"
+#include "xenia/gpu/draw_dump.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -2684,6 +2685,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       // This draw has no effect.
       return true;
     }
+  }
+
+  if (draw_dump::IsActive()) {
+    // Dump the pixel shader's textures even when the pixel shader is skipped
+    // for this draw.
+    auto dump_pixel_shader = static_cast<D3D12Shader*>(active_pixel_shader());
+    if (dump_pixel_shader) {
+      pipeline_cache_->AnalyzeShaderUcode(*dump_pixel_shader);
+    }
+    draw_dump::IndexInfo dump_index_info;
+    if (index_buffer_info && index_buffer_info->guest_base) {
+      dump_index_info.indexed = true;
+      dump_index_info.format = index_buffer_info->format;
+      dump_index_info.endianness = index_buffer_info->endianness;
+      dump_index_info.guest_base = index_buffer_info->guest_base;
+      dump_index_info.length_bytes = uint32_t(index_buffer_info->length);
+    }
+    draw_dump::DumpDraw(regs, *memory_, *vertex_shader, dump_pixel_shader,
+                        primitive_type, index_count, dump_index_info);
   }
 
   const bool memexport_used_pixel =
